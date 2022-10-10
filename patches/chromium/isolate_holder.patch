@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Samuel Attard <samuel.r.attard@gmail.com>
+Date: Thu, 18 Oct 2018 17:07:27 -0700
+Subject: isolate_holder.patch
+
+Pass pre allocated isolate for initialization, node platform
+needs to register on an isolate so that it can be used later
+down in the initialization process of an isolate.
+
+Specifically, v8::Isolate::Initialize ends up calling
+NodePlatform::GetForegroundTaskRunner, which requires that the
+isolate has previously been registered with NodePlatform::RegisterIsolate.
+However, if we let gin allocate the isolate, there's no opportunity
+for us to register the isolate in between Isolate::Allocate and
+Isolate::Initialize.
+
+diff --git a/gin/isolate_holder.cc b/gin/isolate_holder.cc
+index c74b81af691aee95609913519e36498ec578620a..7e1e6ad49ebddb9a4d86789939663b8208d057d5 100644
+--- a/gin/isolate_holder.cc
++++ b/gin/isolate_holder.cc
+@@ -73,7 +73,8 @@ IsolateHolder::IsolateHolder(
+     IsolateType isolate_type,
+     IsolateCreationMode isolate_creation_mode,
+     v8::CreateHistogramCallback create_histogram_callback,
+-    v8::AddHistogramSampleCallback add_histogram_sample_callback)
++    v8::AddHistogramSampleCallback add_histogram_sample_callback,
++    v8::Isolate* isolate)
+     : IsolateHolder(task_runner,
+                     access_mode,
+                     isolate_type,
+@@ -81,14 +82,16 @@ IsolateHolder::IsolateHolder(
+                                              atomics_wait_mode,
+                                              create_histogram_callback,
+                                              add_histogram_sample_callback),
+-                    isolate_creation_mode) {}
++                    isolate_creation_mode,
++                    isolate) {}
+ 
+ IsolateHolder::IsolateHolder(
+     scoped_refptr<base::SingleThreadTaskRunner> task_runner,
+     AccessMode access_mode,
+     IsolateType isolate_type,
+     std::unique_ptr<v8::Isolate::CreateParams> params,
+-    IsolateCreationMode isolate_creation_mode)
++    IsolateCreationMode isolate_creation_mode,
++    v8::Isolate* isolate)
+     : access_mode_(access_mode), isolate_type_(isolate_type) {
+   CHECK(Initialized())
+       << "You need to invoke gin::IsolateHolder::Initialize first";
+@@ -99,7 +102,7 @@ IsolateHolder::IsolateHolder(
+   v8::ArrayBuffer::Allocator* allocator = params->array_buffer_allocator;
+   DCHECK(allocator);
+ 
+-  isolate_ = v8::Isolate::Allocate();
++  isolate_ = isolate ? isolate : v8::Isolate::Allocate();
+   isolate_data_ = std::make_unique<PerIsolateData>(isolate_, allocator,
+                                                    access_mode_, task_runner);
+   //  TODO(https://crbug.com/1347092): Refactor such that caller need not
+diff --git a/gin/public/isolate_holder.h b/gin/public/isolate_holder.h
+index c9bc6e5dd7e1cf8d198afcd21cbb24970337a50f..688f10fa48511818848f6177a1a20a19ebd54f99 100644
+--- a/gin/public/isolate_holder.h
++++ b/gin/public/isolate_holder.h
+@@ -83,13 +83,15 @@ class GIN_EXPORT IsolateHolder {
+       IsolateType isolate_type,
+       IsolateCreationMode isolate_creation_mode = IsolateCreationMode::kNormal,
+       v8::CreateHistogramCallback create_histogram_callback = nullptr,
+-      v8::AddHistogramSampleCallback add_histogram_sample_callback = nullptr);
++      v8::AddHistogramSampleCallback add_histogram_sample_callback = nullptr,
++      v8::Isolate* isolate = nullptr);
+   IsolateHolder(
+       scoped_refptr<base::SingleThreadTaskRunner> task_runner,
+       AccessMode access_mode,
+       IsolateType isolate_type,
+       std::unique_ptr<v8::Isolate::CreateParams> params,
+-      IsolateCreationMode isolate_creation_mode = IsolateCreationMode::kNormal);
++      IsolateCreationMode isolate_creation_mode = IsolateCreationMode::kNormal,
++      v8::Isolate* isolate = nullptr);
+   IsolateHolder(const IsolateHolder&) = delete;
+   IsolateHolder& operator=(const IsolateHolder&) = delete;
+   ~IsolateHolder();

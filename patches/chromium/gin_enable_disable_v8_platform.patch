@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Cheng Zhao <zcbenz@gmail.com>
+Date: Thu, 20 Sep 2018 17:47:44 -0700
+Subject: gin_enable_disable_v8_platform.patch
+
+We don't use gin to create the V8 platform, because we need to inject Node
+things.
+
+diff --git a/gin/isolate_holder.cc b/gin/isolate_holder.cc
+index a82c7d1189b35223647f5de46ed415302f269827..c74b81af691aee95609913519e36498ec578620a 100644
+--- a/gin/isolate_holder.cc
++++ b/gin/isolate_holder.cc
+@@ -137,9 +137,10 @@ void IsolateHolder::Initialize(ScriptMode mode,
+                                const intptr_t* reference_table,
+                                const std::string js_command_line_flags,
+                                v8::FatalErrorCallback fatal_error_callback,
+-                               v8::OOMErrorCallback oom_error_callback) {
++                               v8::OOMErrorCallback oom_error_callback,
++                               bool create_v8_platform) {
+   CHECK(allocator);
+-  V8Initializer::Initialize(mode, js_command_line_flags, oom_error_callback);
++  V8Initializer::Initialize(mode, js_command_line_flags, oom_error_callback, create_v8_platform);
+   g_array_buffer_allocator = allocator;
+   g_reference_table = reference_table;
+   g_fatal_error_callback = fatal_error_callback;
+diff --git a/gin/public/isolate_holder.h b/gin/public/isolate_holder.h
+index 10caab6d9ef3345332c163a55dcef991248ab4ea..c9bc6e5dd7e1cf8d198afcd21cbb24970337a50f 100644
+--- a/gin/public/isolate_holder.h
++++ b/gin/public/isolate_holder.h
+@@ -109,7 +109,8 @@ class GIN_EXPORT IsolateHolder {
+                          const intptr_t* reference_table = nullptr,
+                          const std::string js_command_line_flags = {},
+                          v8::FatalErrorCallback fatal_error_callback = nullptr,
+-                         v8::OOMErrorCallback oom_error_callback = nullptr);
++                         v8::OOMErrorCallback oom_error_callback = nullptr,
++                         bool create_v8_platform = true);
+ 
+   // Returns whether `Initialize` has already been invoked in the process.
+   // Initialization is a one-way operation (i.e., this method cannot return
+diff --git a/gin/v8_initializer.cc b/gin/v8_initializer.cc
+index ec89b58257d262c5c181b09b4db1f809eeba0579..67d3be89ac776ebc39c245641f9fbb4e9dd5e03d 100644
+--- a/gin/v8_initializer.cc
++++ b/gin/v8_initializer.cc
+@@ -367,7 +367,8 @@ void SetFlags(IsolateHolder::ScriptMode mode,
+ // static
+ void V8Initializer::Initialize(IsolateHolder::ScriptMode mode,
+                                const std::string js_command_line_flags,
+-                               v8::OOMErrorCallback oom_error_callback) {
++                               v8::OOMErrorCallback oom_error_callback,
++                               bool create_v8_platform) {
+   static bool v8_is_initialized = false;
+   if (v8_is_initialized)
+     return;
+@@ -377,7 +378,8 @@ void V8Initializer::Initialize(IsolateHolder::ScriptMode mode,
+   // See https://crbug.com/v8/11043
+   SetFlags(mode, js_command_line_flags);
+ 
+-  v8::V8::InitializePlatform(V8Platform::Get());
++  if (create_v8_platform)
++    v8::V8::InitializePlatform(V8Platform::Get());
+ 
+   // Set this as early as possible in order to ensure OOM errors are reported
+   // correctly.
+diff --git a/gin/v8_initializer.h b/gin/v8_initializer.h
+index d499cb43c4e12ca32912fce7078fcadff7509a87..dd9899c3e0dbadfc0074ffce87d51193e1c963cb 100644
+--- a/gin/v8_initializer.h
++++ b/gin/v8_initializer.h
+@@ -31,7 +31,8 @@ class GIN_EXPORT V8Initializer {
+   // This should be called by IsolateHolder::Initialize().
+   static void Initialize(IsolateHolder::ScriptMode mode,
+                          const std::string js_command_line_flags = {},
+-                         v8::OOMErrorCallback oom_error_callback = nullptr);
++                         v8::OOMErrorCallback oom_error_callback = nullptr,
++                         bool create_v8_platform = true);
+ 
+   // Get address and size information for currently loaded snapshot.
+   // If no snapshot is loaded, the return values are null for addresses

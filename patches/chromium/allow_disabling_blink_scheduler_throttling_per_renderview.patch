@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: deepak1556 <hop2deep@gmail.com>
+Date: Mon, 18 May 2020 11:12:26 -0700
+Subject: allow disabling blink scheduler throttling per RenderView
+
+This allows us to disable throttling for hidden windows.
+
+diff --git a/content/browser/renderer_host/render_view_host_impl.cc b/content/browser/renderer_host/render_view_host_impl.cc
+index 8650bbf10070021c6ead3a3b315de6125a8a24cd..6c8c4fcaa78a580dd5bc8b66645e17a61dff31ce 100644
+--- a/content/browser/renderer_host/render_view_host_impl.cc
++++ b/content/browser/renderer_host/render_view_host_impl.cc
+@@ -667,6 +667,11 @@ void RenderViewHostImpl::SetBackgroundOpaque(bool opaque) {
+   GetWidget()->GetAssociatedFrameWidget()->SetBackgroundOpaque(opaque);
+ }
+ 
++void RenderViewHostImpl::SetSchedulerThrottling(bool allowed) {
++  if (auto& broadcast = GetAssociatedPageBroadcast())
++    broadcast->SetSchedulerThrottling(allowed);
++}
++
+ bool RenderViewHostImpl::IsMainFrameActive() {
+   return is_active();
+ }
+diff --git a/content/browser/renderer_host/render_view_host_impl.h b/content/browser/renderer_host/render_view_host_impl.h
+index 84b4727e8e8f7eb84c6654854606dc1d4f3c5fb9..827cf26d2a1e5c2869524c4709a613896a94dbb4 100644
+--- a/content/browser/renderer_host/render_view_host_impl.h
++++ b/content/browser/renderer_host/render_view_host_impl.h
+@@ -138,6 +138,7 @@ class CONTENT_EXPORT RenderViewHostImpl
+   void EnablePreferredSizeMode() override;
+   void WriteIntoTrace(perfetto::TracedProto<TraceProto> context) const override;
+ 
++  void SetSchedulerThrottling(bool allowed) override;
+   void SendWebPreferencesToRenderer();
+   void SendRendererPreferencesToRenderer(
+       const blink::RendererPreferences& preferences);
+diff --git a/content/public/browser/render_view_host.h b/content/public/browser/render_view_host.h
+index 9979c25ecd57e68331b628a518368635db5c2027..32733bf951af3eff7da5fd5758bbcbaa49ff0e3c 100644
+--- a/content/public/browser/render_view_host.h
++++ b/content/public/browser/render_view_host.h
+@@ -76,6 +76,9 @@ class CONTENT_EXPORT RenderViewHost {
+   virtual void WriteIntoTrace(
+       perfetto::TracedProto<TraceProto> context) const = 0;
+ 
++  // Disable/Enable scheduler throttling.
++  virtual void SetSchedulerThrottling(bool allowed) = 0;
++
+  private:
+   // This interface should only be implemented inside content.
+   friend class RenderViewHostImpl;
+diff --git a/third_party/blink/public/mojom/page/page.mojom b/third_party/blink/public/mojom/page/page.mojom
+index 0cfe109e1ee4ac59dc8ddc68dff3ab929fcf480b..398be46c71fb9ea42ea655b204aaff31501d48c9 100644
+--- a/third_party/blink/public/mojom/page/page.mojom
++++ b/third_party/blink/public/mojom/page/page.mojom
+@@ -131,4 +131,7 @@ interface PageBroadcast {
+     mojo_base.mojom.UnguessableToken devtools_frame_token,
+     RemoteFrameInterfacesFromBrowser remote_frame_interfaces,
+     RemoteMainFrameInterfaces remote_main_frame_interfaces);
++
++  // Whether to enable the Renderer scheduler background throttling.
++  SetSchedulerThrottling(bool allowed);
+ };
+diff --git a/third_party/blink/public/web/web_view.h b/third_party/blink/public/web/web_view.h
+index f3b681ec44c57f69c57390f31bd951cef8de3f0c..2fbe866ddf50d7eb324b0e2e4d120f4c4bcf2875 100644
+--- a/third_party/blink/public/web/web_view.h
++++ b/third_party/blink/public/web/web_view.h
+@@ -365,6 +365,7 @@ class BLINK_EXPORT WebView {
+   // Scheduling -----------------------------------------------------------
+ 
+   virtual PageScheduler* Scheduler() const = 0;
++  virtual void SetSchedulerThrottling(bool allowed) = 0;
+ 
+   // Visibility -----------------------------------------------------------
+ 
+diff --git a/third_party/blink/renderer/core/exported/web_view_impl.cc b/third_party/blink/renderer/core/exported/web_view_impl.cc
+index 03b884bf2b0b4f1eaa084ecfda76e926226e8495..74c35b16d5778a5ac0618b9395a855995e9d0296 100644
+--- a/third_party/blink/renderer/core/exported/web_view_impl.cc
++++ b/third_party/blink/renderer/core/exported/web_view_impl.cc
+@@ -3808,13 +3808,21 @@ PageScheduler* WebViewImpl::Scheduler() const {
+   return GetPage()->GetPageScheduler();
+ }
+ 
++void WebViewImpl::SetSchedulerThrottling(bool allowed) {
++  DCHECK(GetPage());
++  scheduler_throttling_allowed_ = allowed;
++  GetPage()->GetPageScheduler()->SetPageVisible(allowed ?
++      (GetVisibilityState() == mojom::blink::PageVisibilityState::kVisible) : true);
++}
++
+ void WebViewImpl::SetVisibilityState(
+     mojom::blink::PageVisibilityState visibility_state,
+     bool is_initial_state) {
+   DCHECK(GetPage());
+   GetPage()->SetVisibilityState(visibility_state, is_initial_state);
+   GetPage()->GetPageScheduler()->SetPageVisible(
+-      visibility_state == mojom::blink::PageVisibilityState::kVisible);
++      scheduler_throttling_allowed_ ?
++          (visibility_state == mojom::blink::PageVisibilityState::kVisible) : true);
+   // Notify observers of the change.
+   if (!is_initial_state) {
+     for (auto& observer : observers_)
+diff --git a/third_party/blink/renderer/core/exported/web_view_impl.h b/third_party/blink/renderer/core/exported/web_view_impl.h
+index ac38111515f40630f2d16c8425e39775e4118818..0a4890ed17305e215eb8963d27767d77471eebb7 100644
+--- a/third_party/blink/renderer/core/exported/web_view_impl.h
++++ b/third_party/blink/renderer/core/exported/web_view_impl.h
+@@ -426,6 +426,7 @@ class CORE_EXPORT WebViewImpl final : public WebView,
+   LocalDOMWindow* PagePopupWindow() const;
+ 
+   PageScheduler* Scheduler() const override;
++  void SetSchedulerThrottling(bool allowed) override;
+   void SetVisibilityState(mojom::blink::PageVisibilityState visibility_state,
+                           bool is_initial_state) override;
+   mojom::blink::PageVisibilityState GetVisibilityState() override;
+@@ -879,6 +880,8 @@ class CORE_EXPORT WebViewImpl final : public WebView,
+   // If true, we send IPC messages when |preferred_size_| changes.
+   bool send_preferred_size_changes_ = false;
+ 
++  bool scheduler_throttling_allowed_ = true;
++
+   // Whether the preferred size may have changed and |UpdatePreferredSize| needs
+   // to be called.
+   bool needs_preferred_size_update_ = true;
